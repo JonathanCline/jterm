@@ -1,257 +1,30 @@
-#include "os/win/terminal.hpp"
+#include "terminal.hpp"
 
 #include <jclib/config.h>
-#include <jclib/ranges.h>
+#include <memory>
+
+#include <Windows.h>
 
 
 
-namespace jterm::os
+struct jterm_Terminal
 {
+	HANDLE out;
+	HANDLE in;
+	HANDLE err;
 
-	void notify_error(const char* _message, const char* _caption)
-	{
-		MessageBoxA(NULL, _message, _caption, MB_OK);
-	};
 
 };
 
 
-namespace jterm::os
+namespace jterm
 {
-
-
 	namespace
 	{
-		inline auto has_input(HANDLE _inBuf)
+		inline auto make_color_attribute(jterm_Color _fgcol, jterm_Color _bkcol)
 		{
-			constexpr size_t record_len = 1;
-			
-			DWORD _count = 0;
-			INPUT_RECORD _record[record_len]{};
-			if (!PeekConsoleInputA(_inBuf, _record, record_len, &_count))
-			{
-				notify_debug("Failed to peek console input", here());
-				JCLIB_ABORT();
-			};
-
-			return _count != 0;
-		};
-	};
-
-
-
-
-	terminal_io_state terminal::get_std_handles()
-	{
-		const auto _in  = GetStdHandle(STD_INPUT_HANDLE);
-		const auto _out = GetStdHandle(STD_OUTPUT_HANDLE);
-		const auto _err = GetStdHandle(STD_ERROR_HANDLE);
-		return terminal_io_state{ _in, _out, _err };
-	};
-
-	void terminal::init_io_state()
-	{
-		this->io_ = this->get_std_handles();
-	};
-
-	
-
-
-
-
-
-
-
-	terminal_options_state terminal::get_options() const
-	{
-		const auto& _outbuf = this->io_.out_;
-
-		CONSOLE_SCREEN_BUFFER_INFO _info{};
-		DWORD _mode{};
-
-		if (!GetConsoleScreenBufferInfo(_outbuf, &_info))
-		{
-			JCLIB_ABORT();
-		};
-		if (!GetConsoleMode(_outbuf, &_mode))
-		{
-			JCLIB_ABORT();
-		};
-
-		terminal_options_state _state{};
-		_state.colors = _info.wAttributes;
-		_state.mode = _mode;
-		return _state;
-	};
-
-	void terminal::set_options(terminal_options_state _opState)
-	{
-		const auto& _outbuf = this->io_.out_;
-
-		if (!SetConsoleTextAttribute(_outbuf, _opState.colors))
-		{
-			JCLIB_ABORT();
-		};
-		if (!SetConsoleMode(_outbuf, _opState.mode))
-		{
-			JCLIB_ABORT();
-		};
-
-	};
-
-	void terminal::set_cursor_pos(size_t _x, size_t _y)
-	{
-		auto& _cursor = this->cursor_;
-		auto& _buffer = this->buffer_;
-
-		_cursor = _buffer.to_index(_x, _y);
-	};
-
-
-	void terminal::write(std::string_view _str)
-	{
-		auto& _cursor = cursor_;
-		auto& _buffer = this->buffer_.data_;
-
-		const auto& _fg = this->foreground_;
-		const auto& _bk = this->background_;
-
-		auto it = jc::next(jc::begin(_buffer), _cursor);
-
-		for (auto& v : _str)
-		{
-			it->character = v;
-			it->fgcolor = _fg;
-			it->bkcolor = _bk;
-			++it;
-			++_cursor;
-		};
-
-	};
-
-
-
-	void terminal::put(char _char, size_t _x, size_t _y)
-	{
-		auto& _buffer = this->buffer_;
-		const auto _index = _buffer.to_index(_x, _y);
-		
-		auto& _cell = _buffer.at(_index);
-
-		_cell.character = _char;
-		_cell.fgcolor = this->foreground_;
-		_cell.bkcolor = this->background_;
-	};
-
-
-	void terminal::get_input_events()
-	{
-		auto& _inBuf = this->io_.in_;
-		while (has_input(_inBuf))
-		{
-			constexpr size_t record_len_v = 16;
-			
-			INPUT_RECORD _record[record_len_v]{};
-			DWORD _count = 0;
-
-			if (!ReadConsoleInputA(_inBuf, _record, record_len_v, &_count))
-			{
-				const auto _err = GetLastError();
-				notify_debug("Failed to read terminal input events", here());
-				JCLIB_ABORT();
-			};
-			
-			auto& _callbacks = this->callbacks();
-			for (auto& v : _record)
-			{
-				if (v.EventType == KEY_EVENT)
-				{
-					const auto& _ev = v.Event.KeyEvent;
-				
-					if (_callbacks.on_text && _ev.bKeyDown && std::isprint(_ev.uChar.AsciiChar))
-					{
-						_callbacks.on_text(_ev.uChar.AsciiChar);
-					};
-				};
-			};
-
-		};
-
-
-
-
-	};
-
-
-	void terminal::swap_buffers()
-	{
-		auto& _outbuf = this->io_.out_;
-		auto& _buffer = this->buffer_;
-
-		auto& _chars = this->characters_;
-		auto& _cols = this->colors_;
-
-		{
-			const auto _bufferLen = _buffer.size();
-			if (_chars.size() != _bufferLen)
-			{
-				_chars.resize(_bufferLen);
-				_cols.resize(_bufferLen);
-			};
-		};
-
-		{
-			auto& _bufferData = _buffer.data_;
-
-			auto it = _bufferData.begin();
-			const auto _end = _bufferData.end();
-
-			auto _charIter = _chars.begin();
-			auto _colorIter = _cols.begin();
-			_colorIter->len = 0;
-
-			for (it; it != _end; ++it)
-			{
-				*_charIter = it->character;
-				_charIter++;
-
-				if (it->fgcolor == _colorIter->fgcolor && it->bkcolor == _colorIter->bkcolor)
-				{
-					++_colorIter->len;
-				}
-				else
-				{
-					++_colorIter;
-					_colorIter->fgcolor = it->fgcolor;
-					_colorIter->bkcolor = it->bkcolor;
-					_colorIter->len = 1;
-				};
-			};
-		};
-
-
-
-		constexpr COORD cursor_start_pos_v{ 0, 0 };
-		if (!SetConsoleCursorPosition(_outbuf, cursor_start_pos_v))
-		{
-			notify_debug("failed to reset terminal cursor position", here());
-			JCLIB_ABORT();
-		};
-
-		size_t _cursor = 0;
-		for (auto& _span : _cols)
-		{
-			{
-				const auto [x, y] = _buffer.to_position(_cursor);
-				this->set_cursor_pos(x, y);
-			};
-
-			const auto _count = _span.len;
-			const auto& _fgcol = _span.fgcolor;
-			const auto& _bkcol = _span.bkcolor;
-
 			WORD _attrib{};
-			
+
 			if (_fgcol.r != 0)
 			{
 				_attrib |= FOREGROUND_RED;
@@ -278,152 +51,142 @@ namespace jterm::os
 				_attrib |= BACKGROUND_BLUE;
 			};
 
-			if (!SetConsoleTextAttribute(_outbuf, _attrib))
-			{
-				notify_debug("failed to set terminal text color", here());
-				JCLIB_ABORT();
-			};
-
-			if (!WriteFile(_outbuf, _chars.data() + _cursor, _count, NULL, NULL))
-			{
-				notify_debug("failed to write buffer to the terminal", here());
-				JCLIB_ABORT();
-			};
-
-			_cursor += _count;
+			return _attrib;
 		};
-
 	};
 
 
 
-	void terminal::set_foreground_color(terminal_cell::color_type _col)
+	/**
+	 * @brief Creates a new terminal
+	*/
+	jterm_Terminal* new_terminal()
 	{
-		this->foreground_ = _col;
-	};
-	void terminal::set_background_color(terminal_cell::color_type _col)
-	{
-		this->background_ = _col;
-	};
+		std::unique_ptr<jterm_Terminal> _out{ new jterm_Terminal{} };
 
+		auto& _term = *_out;
+		_term.out = GetStdHandle(STD_OUTPUT_HANDLE);
+		_term.in  = GetStdHandle(STD_INPUT_HANDLE);
+		_term.err = GetStdHandle(STD_ERROR_HANDLE);
 
-
-
-
-	namespace
-	{
-		// Indirection to open a new terminal window
-		inline bool new_terminal() noexcept
-		{
-			return AllocConsole();
-		};
-
-		inline auto get_console_mode(HANDLE _buf) noexcept
-		{
-			DWORD _mode{};
-			if (!GetConsoleMode(_buf, &_mode))
-			{
-				notify_debug("failed to get console mode", here());
-				JCLIB_ABORT();
-			};
-			return _mode;
-		};
-		inline auto set_console_mode(HANDLE _buf, DWORD _mode) noexcept
-		{
-			const auto _result = SetConsoleMode(_buf, _mode);
-			if (!_result)
-			{
-				const auto _err = GetLastError();
-
-				notify_debug("failed to set console mode", here());
-				JCLIB_ABORT();
-			};
-		};
-
-
-		inline auto get_cursor_info(HANDLE _out) noexcept
-		{
-			CONSOLE_CURSOR_INFO _info{};
-			if (!GetConsoleCursorInfo(_out, &_info))
-			{
-				notify_debug("failed to get cursor info", here());
-				JCLIB_ABORT();
-			};
-			return _info;
-		};
-
-		inline void set_cursor_visiblity(HANDLE _buf, bool _visible) noexcept
-		{
-			CONSOLE_CURSOR_INFO _info = get_cursor_info(_buf);
-			_info.bVisible = _visible;
-			if (!SetConsoleCursorInfo(_buf, &_info))
-			{
-				notify_debug("failed to set cursor info", here());
-				JCLIB_ABORT();
-			};
-		};
-
-		inline void hide_cursor(HANDLE _buf) noexcept
-		{
-			set_cursor_visiblity(_buf, false);
-		};
-
-		inline void show_cursor(HANDLE _buf) noexcept
-		{
-			set_cursor_visiblity(_buf, true);
-		};
-
-		inline void set_immediate_input(HANDLE _buf) noexcept
-		{
-			auto _mode = get_console_mode(_buf);
-			_mode &= ~(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT);
-			set_console_mode(_buf, _mode);
-		};
-
-
+		return _out.release();
 	};
 
-	terminal::terminal(allow_reuse_t)
+	/**
+	 * @brief Deletes a terminal
+	 * @param _term Terminal instance pointer, will be set to null after deletion
+	*/
+	void delete_terminal(jterm_Terminal*& _term)
 	{
-		new_terminal();
-
-		this->init_io_state();
-		hide_cursor(this->io_.out_);
-
-		CONSOLE_SCREEN_BUFFER_INFO _info{};
-		GetConsoleScreenBufferInfo(this->io_.out_, &_info);
-		this->buffer_.resize(_info.dwSize.X, this->buffer_.height());
-
-		set_immediate_input(this->io_.in_);
-
+		delete _term;
+		_term = nullptr;
 	};
-	terminal::terminal()
+
+
+	void get_color(const jterm_Terminal& _term, jterm_Pos x, jterm_Pos y, jterm_Color* _foreground, jterm_Color* _background)
 	{
-		if (!new_terminal())
+		COORD _coord{ x, y };
+		auto& _outbuf = _term.out;
+
+		DWORD _count = 0;
+		WORD _attrib = 0;
+	
+		if (!ReadConsoleOutputAttribute(_outbuf, &_attrib, 1, _coord, &_count)) JCLIB_UNLIKELY
 		{
-			notify_debug("cannot open multiple terminals", here());
 			JCLIB_ABORT();
 		};
 
-		this->init_io_state();
-		hide_cursor(this->io_.out_);
-
-		CONSOLE_SCREEN_BUFFER_INFO _info{};
-		GetConsoleScreenBufferInfo(this->io_.out_, &_info);
-		this->buffer_.resize(_info.dwSize.X, this->buffer_.height());
-
-		set_immediate_input(this->io_.in_);
-	};
-
-
-	terminal::~terminal()
-	{
-		if (!FreeConsole())
+		if (_foreground)
 		{
-			notify_debug("failed to close terminal", here());
+			auto& [r, g, b, a] = *_foreground;
+			
+			if ((_attrib & FOREGROUND_RED) != 0)
+			{
+				r = 255;
+			};
+			if ((_attrib & FOREGROUND_BLUE) != 0)
+			{
+				b = 255;
+			};
+			if ((_attrib & FOREGROUND_GREEN) != 0)
+			{
+				g = 255;
+			};
+		};
+		if (_background)
+		{
+			auto& [r, g, b, a] = *_background;
+
+			if ((_attrib & BACKGROUND_RED) != 0)
+			{
+				r = 255;
+			};
+			if ((_attrib & BACKGROUND_BLUE) != 0)
+			{
+				b = 255;
+			};
+			if ((_attrib & BACKGROUND_GREEN) != 0)
+			{
+				g = 255;
+			};
+		};
+
+	};
+	void set_color(jterm_Terminal& _term, jterm_Pos _x, jterm_Pos _y, jterm_Color _foreground, jterm_Color _background)
+	{
+		COORD _coord{ _x, _y };
+		auto& _outbuf = _term.out;
+		const auto _attrib = make_color_attribute(_foreground, _background);
+
+		DWORD _count = 0;
+		if (!FillConsoleOutputAttribute(_outbuf, _attrib, 1, _coord, &_count))
+		{
 			JCLIB_ABORT();
 		};
 	};
+
+
+
+
+
+
+
+	void fill_color(jterm_Terminal& _term, jterm_Pos _x, jterm_Pos _y, jterm_Pos _w, jterm_Pos _h, jterm_Color _fg, jterm_Color _bg)
+	{
+		COORD _coord{ _x, _y };
+		auto& _outbuf = _term.out;
+
+		DWORD _count = 0;
+		WORD _attrib = make_color_attribute(_fg, _bg);
+
+		for (jterm_Pos row = 0; row != _h; ++row)
+		{
+			if (!FillConsoleOutputAttribute(_outbuf, _attrib, _w, _coord, &_count)) JCLIB_UNLIKELY
+			{
+				JCLIB_ABORT();
+			};
+			++_coord.Y;
+		};
+	};
+
+
+
+	void set(jterm_Terminal& _term, jterm_Char _codepoint, jterm_Pos _x, jterm_Pos _y)
+	{
+		auto& _outbuf = _term.out;
+		DWORD _count = 0;
+
+		COORD _cord{ _x, _y };
+		if (!SetConsoleCursorPosition(_outbuf, _cord))
+		{
+			JCLIB_ABORT();
+		};
+
+		if (!WriteFile(_outbuf, &_codepoint, 1, &_count, MB_OK))
+		{
+			JCLIB_ABORT();
+		};
+	};
+
 
 };
-
